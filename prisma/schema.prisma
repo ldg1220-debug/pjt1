@@ -1,0 +1,461 @@
+// ============================================================================
+// Welder Certification Platform — Prisma Schema
+// Standard: ISO 9606-1:2012 / KS B ISO 9606-1:2012
+// Source of truth: docs/01-database-schema.md
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// Enums
+// ----------------------------------------------------------------------------
+
+enum UserRole {
+  iwe
+  admin
+  operator
+  viewer
+}
+
+enum TestResult {
+  pass
+  fail
+  na
+}
+
+enum JobKnowledgeResult {
+  acceptable
+  not_acceptable
+  not_tested
+}
+
+enum OverallResult {
+  pass
+  fail
+}
+
+enum CertificateStatus {
+  active
+  suspended
+  expired
+  revoked
+}
+
+enum ProlongationType {
+  employer_6m // §9.2
+  examiner_2y // §9.3
+}
+
+// ----------------------------------------------------------------------------
+// Core domain
+// ----------------------------------------------------------------------------
+
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @db.VarChar(200)
+  nameEn    String?  @map("name_en") @db.VarChar(200)
+  team      String?  @db.VarChar(100)
+  logoPath  String?  @map("logo_path") @db.VarChar(500)
+  sealPath  String?  @map("seal_path") @db.VarChar(500)
+  iweCode   String?  @map("iwe_code") @db.VarChar(50)
+  settings  Json?    // organization-level templates (designation, reference_no, etc.)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  users User[]
+
+  @@map("organizations")
+}
+
+model User {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  email          String   @unique @db.VarChar(255)
+  passwordHash   String   @map("password_hash") @db.VarChar(255)
+  fullName       String   @map("full_name") @db.VarChar(100)
+  role           UserRole
+  signaturePath  String?  @map("signature_path") @db.VarChar(500)
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  organization          Organization    @relation(fields: [organizationId], references: [id])
+  examinedTestRecords   TestRecord[]    @relation("ExaminerUser")
+  issuedCertificates    Certificate[]   @relation("IssuedByUser")
+  createdRevisions      CertificateRevision[] @relation("RevisionCreatedBy")
+
+  @@index([organizationId])
+  @@map("users")
+}
+
+model Employer {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @db.VarChar(200)
+  nameEn    String?  @map("name_en") @db.VarChar(200)
+  bizRegNo  String?  @map("biz_reg_no") @db.VarChar(30)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  welders Welder[]
+
+  @@map("employers")
+}
+
+model Welder {
+  id          String   @id @default(uuid()) @db.Uuid
+  employerId  String   @map("employer_id") @db.Uuid
+  welderNo    String   @unique @map("welder_no") @db.VarChar(50)
+  nameKo      String   @map("name_ko") @db.VarChar(50)
+  nameEn      String?  @map("name_en") @db.VarChar(100)
+  birthDate   DateTime? @map("birth_date") @db.Date
+  birthPlace  String?   @map("birth_place") @db.VarChar(100)
+  idMethod    String?   @map("id_method") @db.VarChar(100)
+  photoPath   String?   @map("photo_path") @db.VarChar(500)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
+
+  employer    Employer        @relation(fields: [employerId], references: [id])
+  testRecords TestRecord[]
+  photos      WelderPhoto[]
+
+  @@index([employerId])
+  @@map("welders")
+}
+
+model WelderPhoto {
+  id        String   @id @default(uuid()) @db.Uuid
+  welderId  String   @map("welder_id") @db.Uuid
+  path      String   @db.VarChar(500)
+  label     String?  @db.VarChar(100)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  welder Welder @relation(fields: [welderId], references: [id], onDelete: Cascade)
+
+  @@index([welderId])
+  @@map("welder_photos")
+}
+
+// ----------------------------------------------------------------------------
+// Test records & approval ranges
+// ----------------------------------------------------------------------------
+
+model TestRecord {
+  id                   String    @id @default(uuid()) @db.Uuid
+  serialNo             Int       @map("serial_no")
+  testDate             DateTime  @map("test_date") @db.Date
+  projectName          String?   @map("project_name") @db.VarChar(300)
+  welderId             String    @map("welder_id") @db.Uuid
+  welderNoOverride     String?   @map("welder_no_override") @db.VarChar(50)
+
+  // Test Piece Detail
+  processId            Int       @map("process_id")
+  productTypeId        Int       @map("product_type_id")
+  weldTypeId           Int       @map("weld_type_id")
+  thicknessMm          Decimal   @map("thickness_mm") @db.Decimal(6, 2)
+  depositedThicknessMm Decimal?  @map("deposited_thickness_mm") @db.Decimal(6, 2)
+  outsideDiameterMm    Decimal?  @map("outside_diameter_mm") @db.Decimal(7, 2)
+  positionId           Int       @map("position_id")
+  fillerGroupId        Int       @map("filler_group_id")
+  fillerDesignationId  Int       @map("filler_designation_id")
+  shieldingGasId       Int?      @map("shielding_gas_id")
+  materialGroupId      Int       @map("material_group_id")
+  weldDetailId         Int       @map("weld_detail_id")
+  backingGouging       String?   @map("backing_gouging") @db.VarChar(20)
+  wpsNo                String?   @map("wps_no") @db.VarChar(50)
+
+  // NDE / Mechanical Test Results
+  vtResult             TestResult?         @map("vt_result")
+  rtResult             TestResult?         @map("rt_result")
+  utResult             TestResult?         @map("ut_result")
+  mtResult             TestResult?         @map("mt_result")
+  ptResult             TestResult?         @map("pt_result")
+  bendingResult        TestResult?         @map("bending_result")
+  fractureResult       TestResult?         @map("fracture_result")
+  macroResult          TestResult?         @map("macro_result")
+  additionalTestResult TestResult?         @map("additional_test_result")
+  jobKnowledge         JobKnowledgeResult? @map("job_knowledge")
+
+  // Final verdict
+  overallResult        OverallResult @map("overall_result")
+  failReason           String?       @map("fail_reason")
+  remarks              String?
+  examinerUserId       String?       @map("examiner_user_id") @db.Uuid
+  examiningBody        String?       @map("examining_body") @db.VarChar(200)
+  testLocation         String?       @map("test_location") @db.VarChar(200)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  welder            Welder                   @relation(fields: [welderId], references: [id])
+  examiner          User?                    @relation("ExaminerUser", fields: [examinerUserId], references: [id])
+  process           RefWeldingProcess        @relation(fields: [processId], references: [id])
+  productType       RefProductType           @relation(fields: [productTypeId], references: [id])
+  weldType          RefWeldType              @relation(fields: [weldTypeId], references: [id])
+  position          RefPosition              @relation(fields: [positionId], references: [id])
+  fillerGroup       RefFillerGroup           @relation(fields: [fillerGroupId], references: [id])
+  fillerDesignation RefFillerDesignation     @relation(fields: [fillerDesignationId], references: [id])
+  shieldingGas      RefShieldingGas?         @relation(fields: [shieldingGasId], references: [id])
+  materialGroup     RefMaterialGroup         @relation(fields: [materialGroupId], references: [id])
+  weldDetail        RefWeldDetail            @relation(fields: [weldDetailId], references: [id])
+  approvalRange     ApprovalRange?
+  attachments       TestRecordAttachment[]
+
+  @@index([welderId, testDate, serialNo])
+  @@map("test_records")
+}
+
+model TestRecordAttachment {
+  id           String   @id @default(uuid()) @db.Uuid
+  testRecordId String   @map("test_record_id") @db.Uuid
+  kind         String   @db.VarChar(40) // e.g. "macro_photo", "rt_report"
+  path         String   @db.VarChar(500)
+  originalName String?  @map("original_name") @db.VarChar(255)
+  mimeType     String?  @map("mime_type") @db.VarChar(100)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  testRecord TestRecord @relation(fields: [testRecordId], references: [id], onDelete: Cascade)
+
+  @@index([testRecordId])
+  @@map("test_record_attachments")
+}
+
+model ApprovalRange {
+  id                 String   @id @default(uuid()) @db.Uuid
+  testRecordId       String   @unique @map("test_record_id") @db.Uuid
+  ruleSetId          Int      @map("rule_set_id")
+  calcVersion        String   @map("calc_version") @db.VarChar(20)
+
+  processes          Int[]
+  productTypes       String[] @map("product_types") // CHAR(1)[] logically
+  weldTypes          String[] @map("weld_types")
+  fillerGroups       String[] @map("filler_groups")
+  fillerDesignations String[] @map("filler_designations")
+  shieldingGases     String[] @map("shielding_gases")
+  thicknessMinMm     Decimal? @map("thickness_min_mm") @db.Decimal(6, 2)
+  thicknessMaxMm     Decimal? @map("thickness_max_mm") @db.Decimal(6, 2)
+  diameterMinMm      Decimal? @map("diameter_min_mm") @db.Decimal(7, 2)
+  diameterMaxMm      Decimal? @map("diameter_max_mm") @db.Decimal(7, 2)
+  positions          String[]
+  weldDetails        String[] @map("weld_details")
+  materialGroups     String[] @map("material_groups")
+
+  designationString  String?  @map("designation_string")
+  referenceNo        String?  @map("reference_no") @db.VarChar(100)
+  calcLog            Json?    @map("calc_log")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  testRecord  TestRecord    @relation(fields: [testRecordId], references: [id], onDelete: Cascade)
+  ruleSet     RuleSet       @relation(fields: [ruleSetId], references: [id])
+  certificate Certificate?
+
+  @@map("approval_ranges")
+}
+
+// ----------------------------------------------------------------------------
+// Certificates & lifecycle
+// ----------------------------------------------------------------------------
+
+model Certificate {
+  id               String           @id @default(uuid()) @db.Uuid
+  approvalRangeId  String           @unique @map("approval_range_id") @db.Uuid
+  certificateNo    String           @unique @map("certificate_no") @db.VarChar(100)
+  issuedDate       DateTime         @map("issued_date") @db.Date
+  weldingDate      DateTime         @map("welding_date") @db.Date
+  validFrom        DateTime         @map("valid_from") @db.Date
+  validUntil       DateTime         @map("valid_until") @db.Date
+  welderSnapshot   Json             @map("welder_snapshot")
+  employerSnapshot Json             @map("employer_snapshot")
+  rangeSnapshot    Json             @map("range_snapshot")
+  wpsNo            String?          @map("wps_no") @db.VarChar(50)
+  status           CertificateStatus @default(active)
+  revokedReason    String?          @map("revoked_reason")
+  excelPath        String?          @map("excel_path") @db.VarChar(500)
+  pdfPath          String?          @map("pdf_path") @db.VarChar(500)
+  qrToken          String?          @unique @map("qr_token") @db.VarChar(64)
+  issuedByUserId   String?          @map("issued_by_user_id") @db.Uuid
+  createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt        DateTime         @updatedAt @map("updated_at") @db.Timestamptz()
+
+  approvalRange   ApprovalRange              @relation(fields: [approvalRangeId], references: [id])
+  issuedByUser    User?                      @relation("IssuedByUser", fields: [issuedByUserId], references: [id])
+  prolongations   CertificateProlongation[]
+  revisions       CertificateRevision[]
+
+  @@index([validUntil])
+  @@index([status])
+  @@map("certificates")
+}
+
+model CertificateProlongation {
+  id               String           @id @default(uuid()) @db.Uuid
+  certificateId    String           @map("certificate_id") @db.Uuid
+  type             ProlongationType
+  prolongationDate DateTime         @map("prolongation_date") @db.Date
+  signedBy         String?          @map("signed_by") @db.VarChar(100)
+  positionOrTitle  String?          @map("position_or_title") @db.VarChar(100)
+  signaturePath    String?          @map("signature_path") @db.VarChar(500)
+  newValidUntil    DateTime         @map("new_valid_until") @db.Date
+  createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz()
+
+  certificate Certificate @relation(fields: [certificateId], references: [id], onDelete: Cascade)
+
+  @@index([certificateId])
+  @@map("certificate_prolongations")
+}
+
+model CertificateRevision {
+  id            String   @id @default(uuid()) @db.Uuid
+  certificateId String   @map("certificate_id") @db.Uuid
+  revisionNo    Int      @map("revision_no")
+  changes       Json
+  reason        String?
+  createdById   String?  @map("created_by") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  certificate Certificate @relation(fields: [certificateId], references: [id], onDelete: Cascade)
+  createdBy   User?       @relation("RevisionCreatedBy", fields: [createdById], references: [id])
+
+  @@unique([certificateId, revisionNo])
+  @@map("certificate_revisions")
+}
+
+// ----------------------------------------------------------------------------
+// Reference / lookup tables (ISO 9606-1:2012)
+// ----------------------------------------------------------------------------
+
+model RefWeldingProcess {
+  id          Int      @id
+  code        String   @unique @db.VarChar(10) // ISO 4063 numeric as text (e.g. "141")
+  name        String   @db.VarChar(200)
+  nameEn      String?  @map("name_en") @db.VarChar(200)
+  category    String?  @db.VarChar(80)
+  description String?
+  testRecords TestRecord[]
+  @@map("ref_welding_processes")
+}
+
+model RefProductType {
+  id          Int      @id
+  code        String   @unique @db.VarChar(2) // P | T
+  name        String   @db.VarChar(40)
+  description String?
+  testRecords TestRecord[]
+  @@map("ref_product_types")
+}
+
+model RefWeldType {
+  id          Int      @id
+  code        String   @unique @db.VarChar(4) // BW | FW
+  name        String   @db.VarChar(40)
+  description String?
+  testRecords TestRecord[]
+  @@map("ref_weld_types")
+}
+
+model RefPosition {
+  id          Int      @id
+  code        String   @unique @db.VarChar(10) // PA … J-L045
+  name        String   @db.VarChar(80)
+  appliesTo   String?  @map("applies_to") @db.VarChar(20) // plate|pipe|both
+  testRecords TestRecord[]
+  @@map("ref_positions")
+}
+
+model RefFillerGroup {
+  id          Int      @id
+  code        String   @unique @db.VarChar(10) // FM1 … FM7
+  name        String   @db.VarChar(120)
+  description String?
+  testRecords TestRecord[]
+  @@map("ref_filler_groups")
+}
+
+model RefFillerDesignation {
+  id          Int      @id
+  code        String   @unique @db.VarChar(4) // S, M, B, R, P, V, W, Y, Z, N
+  name        String   @db.VarChar(100)
+  description String?
+  testRecords TestRecord[]
+  @@map("ref_filler_designations")
+}
+
+model RefShieldingGas {
+  id          Int      @id
+  code        String   @unique @db.VarChar(10) // M21, C1, I1 …
+  groupCode   String   @map("group_code") @db.VarChar(4) // M / C / I / R / N / O
+  name        String   @db.VarChar(120)
+  composition String?  @db.VarChar(200)
+  testRecords TestRecord[]
+  @@map("ref_shielding_gases")
+}
+
+model RefMaterialGroup {
+  id          Int      @id
+  code        String   @unique @db.VarChar(10) // 1.1, 8.2, 21 …
+  parentGroup String?  @map("parent_group") @db.VarChar(4) // "1","8","21" …
+  name        String   @db.VarChar(200)
+  description String?
+  testRecords TestRecord[]
+  @@map("ref_material_groups")
+}
+
+model RefWeldDetail {
+  id          Int      @id
+  code        String   @unique @db.VarChar(10) // "ss nb" | "ss mb" | "bs"
+  name        String   @db.VarChar(120)
+  description String?
+  testRecords TestRecord[]
+  @@map("ref_weld_details")
+}
+
+model RefTestType {
+  id          Int     @id
+  code        String  @unique @db.VarChar(20) // VT, RT, UT, MT, PT, Bend …
+  name        String  @db.VarChar(120)
+  category    String? @db.VarChar(40) // nde | mechanical | other
+  description String?
+  @@map("ref_test_types")
+}
+
+// ----------------------------------------------------------------------------
+// Rule engine (versioned)
+// ----------------------------------------------------------------------------
+
+model RuleSet {
+  id            Int      @id @default(autoincrement())
+  code          String   @unique @db.VarChar(60) // ISO-9606-1-2012
+  standard      String   @db.VarChar(40)         // ISO 9606-1
+  year          Int
+  effectiveFrom DateTime? @map("effective_from") @db.Date
+  effectiveTo   DateTime? @map("effective_to") @db.Date
+  isActive      Boolean   @default(true) @map("is_active")
+  description   String?
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+
+  tables         RuleTable[]
+  approvalRanges ApprovalRange[]
+
+  @@map("rule_sets")
+}
+
+model RuleTable {
+  id        Int      @id @default(autoincrement())
+  ruleSetId Int      @map("rule_set_id")
+  tableKey  String   @map("table_key") @db.VarChar(80)
+  payload   Json
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  ruleSet RuleSet @relation(fields: [ruleSetId], references: [id], onDelete: Cascade)
+
+  @@unique([ruleSetId, tableKey])
+  @@map("rule_tables")
+}
